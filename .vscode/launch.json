@@ -5,19 +5,17 @@
     "version": "0.2.0",
     "configurations": [
         {
-            "name": "App",
-            "type": "go",
+            "name": "Python: App Server",
+            "type": "python",
             "request": "launch",
-            "mode": "debug",
-            "program": "${workspaceFolder}/demoapp/cmd/app/main.go",
+            "program": "${workspaceFolder}/demoapp/cmd/app/main.py",
             "envFile": "${workspaceFolder}/.env"
         },
         {
-            "name": "Load",
-            "type": "go",
+            "name": "Python: Load Generator",
+            "type": "python",
             "request": "launch",
-            "mode": "debug",
-            "program": "${workspaceFolder}/demoapp/cmd/load/main.go",
+            "program": "${workspaceFolder}/demoapp/cmd/load/main.py",
             "envFile": "${workspaceFolder}/.env"
         },
     ]
