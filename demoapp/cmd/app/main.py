@@ -1,190 +1,162 @@
-#!/usr/bin/env python3
-
 import os
 import time
-import sys
+import random
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse
-from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
+import threading
+from prometheus_client import generate_latest, REGISTRY
 
-sys.path.append(os.path.join(os.path.dirname(__file__), '..', '..'))
+# Allow running this file directly by ensuring the project root is on sys.path
+import os as _os
+import sys as _sys
+if __package__ is None or __package__ == "":
+    _PROJECT_ROOT = _os.path.abspath(_os.path.join(_os.path.dirname(__file__), "../../.."))
+    if _PROJECT_ROOT not in _sys.path:
+        _sys.path.insert(0, _PROJECT_ROOT)
 
-from internal.helpers.http import Random2xx, Random4xx, Random5xx, RandomDurationMS
-from internal.metrics.metrics import (
-    http_requests_inflight_max,
-    http_requests_total,
-    http_requests_current,
-    http_requests_duration_histogram,
-    http_requests_duration_summary,
-    register_metrics
-)
+from demoapp.internal.metrics import metrics
+from demoapp.internal.middleware.httpmetrics import http_metrics_middleware, get_route_pattern
+from demoapp.internal.middleware.inflightrequest import inflight_requests_middleware
 
-
-def get_http_requests_inflight_max():
-    """Get max inflight requests from environment variable."""
-    http_requests_inflight_max_str = os.getenv("HTTP_REQUESTS_INFLIGHT_MAX", "20.0")
-    try:
-        return float(http_requests_inflight_max_str)
-    except ValueError:
-        return 20.0
-
-
-class DemoHTTPRequestHandler(BaseHTTPRequestHandler):
-    """HTTP request handler for the demo application."""
+class StatusResponseWriter:
+    def __init__(self, handler):
+        self.handler = handler
+        self.status = 200
     
+    def write_header(self, status: int):
+        self.status = status
+        self.handler.send_response(status)
+    
+    def get_status_string(self) -> str:
+        return str(self.status)
+
+class RequestHandler(BaseHTTPRequestHandler):
+    def __init__(self, *args, **kwargs):
+        self._response_status = 200
+        super().__init__(*args, **kwargs)
+    
+    def send_response(self, code, message=None):
+        self._response_status = code
+        super().send_response(code, message)
+    
+    def get_status_string(self):
+        return str(self._response_status)
+    
+    def get_route_pattern(self):
+        return get_route_pattern(self)
+    
+    @http_metrics_middleware
+    @inflight_requests_middleware
     def do_GET(self):
-        """Handle GET requests."""
-        start_time = time.time()
-        
-        # Increment inflight requests
-        http_requests_current.inc()
-        
+        """
+        Обработчик GET запросов с примененными middleware
+        """
         try:
-            # Parse the URL
+            # Создаем StatusResponseWriter
+            status_writer = StatusResponseWriter(self)
+            
+            # Парсим URL
             parsed_path = urlparse(self.path)
             path = parsed_path.path
             
-            # Route the request
-            if path == '/code-2xx':
-                self._handle_code_2xx()
-            elif path == '/code-4xx':
-                self._handle_code_4xx()
-            elif path == '/code-5xx':
-                self._handle_code_5xx()
-            elif path == '/ms-200':
-                self._handle_ms_200()
-            elif path == '/ms-500':
-                self._handle_ms_500()
-            elif path == '/ms-1000':
-                self._handle_ms_1000()
-            elif path == '/metrics':
-                self._handle_metrics()
+            # Логируем запрос
+            self.log_message(f"GET {path}")
+            
+            # Обрабатываем различные эндпоинты
+            if path == "/code-2xx":
+                status = self.random_2xx()
+                status_writer.write_header(status)
+                self.end_headers()
+                
+            elif path == "/code-4xx":
+                status = self.random_4xx()
+                status_writer.write_header(status)
+                self.end_headers()
+                
+            elif path == "/code-5xx":
+                status = self.random_5xx()
+                status_writer.write_header(status)
+                self.end_headers()
+                
+            elif path == "/ms-200":
+                sleep_time = self.random_duration_ms(200) / 1000.0
+                time.sleep(sleep_time)
+                status_writer.write_header(200)
+                self.end_headers()
+                self.wfile.write(b'{"status": "ok"}')
+                
+            elif path == "/ms-500":
+                sleep_time = self.random_duration_ms(500) / 1000.0
+                time.sleep(sleep_time)
+                status_writer.write_header(200)
+                self.end_headers()
+                self.wfile.write(b'{"status": "ok"}')
+                
+            elif path == "/ms-1000":
+                sleep_time = self.random_duration_ms(1000) / 1000.0
+                time.sleep(sleep_time)
+                status_writer.write_header(200)
+                self.end_headers()
+                self.wfile.write(b'{"status": "ok"}')
+                
+            elif path == "/metrics":
+                status_writer.write_header(200)
+                self.send_header('Content-type', 'text/plain')
+                self.end_headers()
+                self.wfile.write(generate_latest(REGISTRY))
+                
             else:
-                self._handle_not_found()
+                status_writer.write_header(404)
+                self.end_headers()
             
-            # Record metrics
-            elapsed_seconds = time.time() - start_time
-            status_code = getattr(self, '_status_code', 200)
-            
-            http_requests_total.labels(
-                pattern=path,
-                method=self.command,
-                status=str(status_code)
-            ).inc()
-            
-            http_requests_duration_histogram.labels(
-                pattern=path,
-                method=self.command
-            ).observe(elapsed_seconds)
-            
-            http_requests_duration_summary.labels(
-                pattern=path,
-                method=self.command
-            ).observe(elapsed_seconds)
-            
-        finally:
-            # Decrement inflight requests
-            http_requests_current.dec()
+        except Exception as e:
+            self.log_error(f"Error handling request: {e}")
+            self.send_response(500)
+            self.end_headers()
     
-    def _handle_code_2xx(self):
-        """Handle /code-2xx endpoint."""
-        status_code = Random2xx()
-        self._status_code = status_code
-        self.send_response(status_code)
-        self.end_headers()
+    def random_2xx(self):
+        return random.choice([200, 201, 202, 204])
     
-    def _handle_code_4xx(self):
-        """Handle /code-4xx endpoint."""
-        status_code = Random4xx()
-        self._status_code = status_code
-        self.send_response(status_code)
-        self.end_headers()
+    def random_4xx(self):
+        return random.choice([400, 401, 403, 404, 409, 422, 429])
     
-    def _handle_code_5xx(self):
-        """Handle /code-5xx endpoint."""
-        status_code = Random5xx()
-        self._status_code = status_code
-        self.send_response(status_code)
-        self.end_headers()
+    def random_5xx(self):
+        return random.choice([500, 502, 503, 504])
     
-    def _handle_ms_200(self):
-        """Handle /ms-200 endpoint."""
-        duration = RandomDurationMS(200)
-        time.sleep(duration)
-        self._status_code = 200
-        self.send_response(200)
-        self.end_headers()
-    
-    def _handle_ms_500(self):
-        """Handle /ms-500 endpoint."""
-        duration = RandomDurationMS(500)
-        time.sleep(duration)
-        self._status_code = 200
-        self.send_response(200)
-        self.end_headers()
-    
-    def _handle_ms_1000(self):
-        """Handle /ms-1000 endpoint."""
-        duration = RandomDurationMS(1000)
-        time.sleep(duration)
-        self._status_code = 200
-        self.send_response(200)
-        self.end_headers()
-    
-    def _handle_metrics(self):
-        """Handle /metrics endpoint."""
-        metrics_data = generate_latest()
-        self._status_code = 200
-        self.send_response(200)
-        self.send_header('Content-Type', CONTENT_TYPE_LATEST)
-        self.send_header('Content-Length', str(len(metrics_data)))
-        self.end_headers()
-        self.wfile.write(metrics_data)
-    
-    def _handle_not_found(self):
-        """Handle 404 Not Found."""
-        self._status_code = 404
-        self.send_response(404)
-        self.end_headers()
-        self.wfile.write(b'Not Found')
+    def random_duration_ms(self, max_ms):
+        return random.uniform(0, max_ms)
     
     def log_message(self, format, *args):
-        """Log an arbitrary message."""
-        print(f"{self.address_string()} - - [{self.log_date_time_string()}] {format % args}")
+        print(f"{self.log_date_time_string()} - {format % args}")
+    
+    def log_error(self, message):
+        print(f"ERROR: {message}")
 
+def get_http_requests_inflight_max():
+    http_requests_inflight_max_string = os.getenv("HTTP_REQUESTS_INFLIGHT_MAX")
+    http_requests_inflight_max = 20.0
+    
+    if http_requests_inflight_max_string:
+        try:
+            http_requests_inflight_max = float(http_requests_inflight_max_string)
+        except (ValueError, TypeError):
+            pass
+    
+    return http_requests_inflight_max
 
 def main():
-    """Main entry point."""
-    # Register Prometheus metrics
-    register_metrics()
-    
-    # Set max inflight requests
+    # Устанавливаем максимальное количество inflight запросов
     max_inflight = get_http_requests_inflight_max()
-    http_requests_inflight_max.set(max_inflight)
+    metrics.HttpRequestsInflightMax.set(max_inflight)
     
-    # Create and start the HTTP server
-    server_address = ('0.0.0.0', 8080)
-    httpd = HTTPServer(server_address, DemoHTTPRequestHandler)
-    
-    print(f"Starting server on http://{server_address[0]}:{server_address[1]}")
-    print("Available endpoints:")
-    print("  GET /code-2xx   - Random 2xx status code")
-    print("  GET /code-4xx   - Random 4xx status code") 
-    print("  GET /code-5xx   - Random 5xx status code")
-    print("  GET /ms-200     - Sleep up to 200ms")
-    print("  GET /ms-500     - Sleep up to 500ms")
-    print("  GET /ms-1000    - Sleep up to 1000ms")
-    print("  GET /metrics    - Prometheus metrics")
+    server = HTTPServer(('0.0.0.0', 8080), RequestHandler)
+    print("Starting server on http://0.0.0.0:8080")
     
     try:
-        httpd.serve_forever()
+        server.serve_forever()
     except KeyboardInterrupt:
         print("\nShutting down server...")
-        httpd.shutdown()
+        server.shutdown()
 
-
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
-
-
-

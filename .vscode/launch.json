@@ -5,16 +5,18 @@
     "version": "0.2.0",
     "configurations": [
         {
-            "name": "Python: App Server",
+            "name": "App",
             "type": "python",
             "request": "launch",
+            "mode": "debug",
             "program": "${workspaceFolder}/demoapp/cmd/app/main.py",
             "envFile": "${workspaceFolder}/.env"
         },
         {
-            "name": "Python: Load Generator",
+            "name": "Load",
             "type": "python",
             "request": "launch",
+            "mode": "debug",
             "program": "${workspaceFolder}/demoapp/cmd/load/main.py",
             "envFile": "${workspaceFolder}/.env"
         },
