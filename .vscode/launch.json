@@ -6,18 +6,18 @@
     "configurations": [
         {
             "name": "App",
-            "type": "go",
+            "type": "python",
             "request": "launch",
             "mode": "debug",
-            "program": "${workspaceFolder}/demoapp/cmd/app/main.go",
+            "program": "${workspaceFolder}/demoapp/cmd/app/main.py",
             "envFile": "${workspaceFolder}/.env"
         },
         {
             "name": "Load",
-            "type": "go",
+            "type": "python",
             "request": "launch",
             "mode": "debug",
-            "program": "${workspaceFolder}/demoapp/cmd/load/main.go",
+            "program": "${workspaceFolder}/demoapp/cmd/load/main.py",
             "envFile": "${workspaceFolder}/.env"
         },
     ]
