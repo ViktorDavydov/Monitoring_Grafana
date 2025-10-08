@@ -1,15 +1,11 @@
-#!/usr/bin/env python3
-
 import os
 import random
 import time
-import threading
-from urllib.request import urlopen
-from urllib.error import URLError, HTTPError
+import requests
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import List, Dict
 
-
-# List of available endpoints
-ENDPOINTS = [
+endpoints = [
     "/code-2xx",
     "/code-4xx", 
     "/code-5xx",
@@ -18,129 +14,77 @@ ENDPOINTS = [
     "/ms-1000",
 ]
 
-# Global requests counter
-requests_count = {}
-
-
-def get_max_requests_count():
-    """Get maximum request counts from environment variables."""
+def get_max_requests_count() -> tuple[int, int]:
     max_successful_requests = 15
     max_error_requests = 5
-    
-    max_successful_str = os.getenv("HTTP_REQUESTS_SUCCESSFUL_MAX")
-    if max_successful_str:
+
+    max_successful_requests_string = os.getenv("HTTP_REQUESTS_SUCCESSFUL_MAX")
+    if max_successful_requests_string:
         try:
-            max_successful_requests = int(max_successful_str)
+            max_successful_requests = int(max_successful_requests_string)
         except ValueError:
             pass
-    
-    max_error_str = os.getenv("HTTP_REQUESTS_ERROR_MAX")
-    if max_error_str:
+
+    max_error_requests_string = os.getenv("HTTP_REQUESTS_ERROR_MAX")
+    if max_error_requests_string:
         try:
-            max_error_requests = int(max_error_str)
+            max_error_requests = int(max_error_requests_string)
         except ValueError:
             pass
-    
+
     return max_successful_requests, max_error_requests
 
-
 def randomize_endpoints():
-    """Shuffle the endpoints list randomly."""
-    random.shuffle(ENDPOINTS)
+    random.shuffle(endpoints)
 
-
-def make_request(endpoint):
-    """Make HTTP request to the specified endpoint."""
+def make_request(endpoint: str):
     try:
-        url = f"http://localhost:8080{endpoint}"
-        with urlopen(url, timeout=5) as response:
-            return response.getcode()
-    except HTTPError as e:
-        # HTTP errors (4xx, 5xx) are expected for some endpoints
-        return e.code
-    except URLError as e:
-        print(f"Request error for {endpoint}: {e}")
-        return None
+        response = requests.get(f"http://localhost:8080{endpoint}", timeout=30)
+        return f"Request to {endpoint}: Status {response.status_code}"
     except Exception as e:
-        print(f"Unexpected error for {endpoint}: {e}")
-        return None
-
-
-def worker_thread(endpoint, request_count, results_lock, completed_count):
-    """Worker thread to make requests to a specific endpoint."""
-    for i in range(request_count):
-        status_code = make_request(endpoint)
-        
-        with results_lock:
-            completed_count[0] += 1
-            if completed_count[0] % 10 == 0:
-                print(f"Completed {completed_count[0]} requests")
-
+        return f"Error making request to {endpoint}: {e}"
 
 def main():
-    """Main load generator loop."""
     max_successful_requests, max_error_requests = get_max_requests_count()
     
-    # Set random seed
-    random.seed(int(time.time()))
-    
-    print("Load generator starting...")
-    print(f"Max successful requests per endpoint: {max_successful_requests}")
-    print(f"Max error requests per endpoint: {max_error_requests}")
-    
     while True:
+        requests_dict = {}
         total_requests_count = 0
-        
-        # Randomize endpoint order
+
         randomize_endpoints()
-        
-        # Calculate requests per endpoint
-        for endpoint in ENDPOINTS:
-            requests_to_endpoint = 0
-            
-            # Determine request count based on endpoint type
-            if endpoint == "/code-200" or endpoint.startswith("/ms-"):
+
+        # Распределяем запросы по эндпоинтам
+        for endpoint in endpoints:
+            if endpoint == "/code-2xx" or endpoint.startswith("/ms-"):
                 requests_to_endpoint = random.randint(0, max_successful_requests)
             else:
                 requests_to_endpoint = random.randint(0, max_error_requests)
-            
-            requests_count[endpoint] = requests_to_endpoint
+
+            requests_dict[endpoint] = requests_to_endpoint
             total_requests_count += requests_to_endpoint
-        
-        print(f"\nStarting batch with {total_requests_count} total requests")
-        
-        # Create threads for concurrent requests
-        threads = []
-        results_lock = threading.Lock()
-        completed_count = [0]  # Use list to make it mutable in nested scope
-        
-        for endpoint, count in requests_count.items():
-            if count > 0:
-                print(f"  {endpoint}: {count} requests")
-                thread = threading.Thread(
-                    target=worker_thread,
-                    args=(endpoint, count, results_lock, completed_count)
-                )
-                threads.append(thread)
-        
-        # Start all threads
-        start_time = time.time()
-        for thread in threads:
-            thread.start()
-        
-        # Wait for all threads to complete
-        for thread in threads:
-            thread.join()
-        
-        elapsed_time = time.time() - start_time
-        print(f"Batch completed: {total_requests_count} requests in {elapsed_time:.2f} seconds")
-        
-        # Small delay between batches
+
+        print(f"Total requests in this iteration: {total_requests_count}")
+        print(f"Requests distribution: {requests_dict}")
+
+        # Используем ThreadPoolExecutor для управления потоками
+        with ThreadPoolExecutor(max_workers=50) as executor:
+            # Создаем задачи для всех запросов
+            futures = []
+            for endpoint, requests_count in requests_dict.items():
+                for i in range(requests_count):
+                    future = executor.submit(make_request, endpoint)
+                    futures.append(future)
+
+            # Ожидаем завершения и выводим результаты
+            for future in as_completed(futures):
+                try:
+                    result = future.result()
+                    print(result)
+                except Exception as e:
+                    print(f"Future error: {e}")
+
+        print("Iteration completed. Starting next iteration...")
         time.sleep(1)
 
-
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
-
-
-
