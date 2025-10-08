@@ -1,65 +1,213 @@
-# monitoring-grafana
+# Monitoring Grafana (Python)
 
-Окружение для курса [Мониторинг в Grafana](https://slurm.io/monitoring-grafana). Окружение состоит из приложения, которое отдает метрики, описанные в таблице, и скрипта-генератора нагрузки
+Демо-проект для курса **«Мониторинг в Grafana»**: минимальное Python‑приложение с экспортом Prometheus‑метрик и отдельным генератором нагрузки.
 
-| Метрика                                  | Тип        | Описание |
-|------------------------------------------|------------|----------|
-| http_requests_total                      | counter    | Количество обработанных http запросов |
-| http_requests_inflight_current           | gauge      | Количество http запросов, которые обрабатываются прямо сейчас |
-| http_requests_inflight_max               | gauge      | Максимально количество http запросов, которые могут обрабатываться "одновременно" |
-| http_request_duration_seconds_historgram | historgram | Время обработки http запросов |
-| http_request_duration_seconds_summary    | summary    | Время обработки http запросов |
+### Что внутри
+- **demoapp/cmd/app** — HTTP‑сервер с эндпойнтами и `/metrics`.
+- **demoapp/cmd/load** — генератор нагрузки (многопоточный).
+- **demoapp/internal** — метрики и middleware.
 
-## Requirements
+## Быстрый старт (Docker)
 
-- Visual Studio Code
-- Docker + docker-compose
+Ниже — два варианта: через `docker build && docker run` или `docker-compose`.
+
+### Вариант A. Чистый Docker
+
+1) Соберите образ приложения:
+
+```bash
+docker build -t demoapp:latest -f - . <<'DOCKERFILE'
+FROM python:3.11-slim
+WORKDIR /app
+COPY requirements.txt ./
+RUN pip install --no-cache-dir -r requirements.txt
+COPY . .
+ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
+EXPOSE 8080
+CMD ["python", "-m", "demoapp.cmd.app.main"]
+DOCKERFILE
+```
+
+2) (Опционально) Соберите образ генератора нагрузки:
+
+```bash
+docker build -t demo-load:latest -f - . <<'DOCKERFILE'
+FROM python:3.11-slim
+WORKDIR /app
+COPY requirements.txt ./
+RUN pip install --no-cache-dir -r requirements.txt
+COPY . .
+ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
+CMD ["python", "-m", "demoapp.cmd.load.main"]
+DOCKERFILE
+```
+
+3) Создайте сеть и запустите контейнеры:
+
+```bash
+docker network create demo-net || true
+docker run --rm -d --name app --network demo-net -p 8080:8080 \
+  -e HTTP_REQUESTS_INFLIGHT_MAX=20 \
+  demoapp:latest
+
+# Генератор нагрузки будет обращаться к сервису по имени контейнера `app`
+docker run --rm -d --name load --network demo-net \
+  -e HTTP_REQUESTS_SUCCESSFUL_MAX=15 \
+  -e HTTP_REQUESTS_ERROR_MAX=5 \
+  -e TARGET_BASE_URL=http://app:8080 \
+  demo-load:latest
+```
+
+4) Проверьте метрики:
+
+```bash
+curl http://localhost:8080/metrics
+```
+
+Остановка:
+
+```bash
+docker rm -f load app
+docker network rm demo-net
+```
+
+### Вариант B. docker-compose
+
+Создайте файл `docker-compose.yml` рядом с `README.md`:
+
+```yaml
+version: "3.9"
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile.app
+    environment:
+      HTTP_REQUESTS_INFLIGHT_MAX: 20
+    ports:
+      - "8080:8080"
+
+  load:
+    build:
+      context: .
+      dockerfile: Dockerfile.load
+    environment:
+      HTTP_REQUESTS_SUCCESSFUL_MAX: 15
+      HTTP_REQUESTS_ERROR_MAX: 5
+      TARGET_BASE_URL: http://app:8080
+    depends_on:
+      - app
+```
+
+И два простых Dockerfile:
+
+```dockerfile
+# Dockerfile.app
+FROM python:3.11-slim
+WORKDIR /app
+COPY requirements.txt ./
+RUN pip install --no-cache-dir -r requirements.txt
+COPY . .
+EXPOSE 8080
+CMD ["python", "-m", "demoapp.cmd.app.main"]
+```
+
+```dockerfile
+# Dockerfile.load
+FROM python:3.11-slim
+WORKDIR /app
+COPY requirements.txt ./
+RUN pip install --no-cache-dir -r requirements.txt
+COPY . .
+CMD ["python", "-m", "demoapp.cmd.load.main"]
+```
+
+Запуск:
+
+```bash
+docker compose up --build -d
+# Проверка
+curl http://localhost:8080/metrics
+```
+
+Остановка:
+
+```bash
+docker compose down -v
+```
+
+## Эндпойнты приложения
+- `GET /code-2xx` — случайный 2xx.
+- `GET /code-4xx` — случайный 4xx.
+- `GET /code-5xx` — случайный 5xx.
+- `GET /ms-200` — ответ с задержкой до 200ms и `200`.
+- `GET /ms-500` — задержка до 500ms и `200`.
+- `GET /ms-1000` — задержка до 1000ms и `200`.
+- `GET /metrics` — метрики Prometheus.
+
+## Метрики Prometheus
+Экспортируются через `prometheus_client` и обновляются middleware:
+
+| Метрика                               | Тип       | Лейблы                         | Описание |
+|---------------------------------------|-----------|--------------------------------|----------|
+| `http_requests_total`                 | counter   | `pattern`, `method`, `status`  | Кол-во обработанных HTTP‑запросов |
+| `http_requests_inflight_current`      | gauge     | —                              | Текущие обрабатываемые запросы |
+| `http_requests_inflight_max`          | gauge     | —                              | Максимум одновременных запросов (настраивается) |
+| `http_request_duration_seconds_histogram` | histogram | `pattern`, `method`            | Гистограмма времени обработки |
+| `http_request_duration_seconds_summary`   | summary   | `pattern`, `method`            | Сводка времени обработки |
+
+## Переменные окружения
+Можно передавать как обычные env‑переменные перед запуском процесса.
+
+| Переменная | Назначение | По умолчанию |
+|---|---|---|
+| `HTTP_REQUESTS_INFLIGHT_MAX` | Верхняя граница `http_requests_inflight_max` в приложении | `20` |
+| `HTTP_REQUESTS_SUCCESSFUL_MAX` | Верхняя граница успешных запросов в генераторе нагрузки | `15` |
+| `HTTP_REQUESTS_ERROR_MAX` | Верхняя граница ошибочных запросов в генераторе нагрузки | `5` |
+
+Пример запуска с кастомными значениями:
+
+```bash
+HTTP_REQUESTS_INFLIGHT_MAX=50 \
+HTTP_REQUESTS_SUCCESSFUL_MAX=25 \
+HTTP_REQUESTS_ERROR_MAX=10 \
+python -m demoapp.cmd.app.main
+```
+
+## Интеграция с Prometheus и Grafana
+Если Prometheus и Grafana тоже запущены в Compose, используйте имя сервиса `app` как `target`:
+
+```yaml
+scrape_configs:
+  - job_name: 'demoapp'
+    static_configs:
+      - targets: ['app:8080']
+```
+
+Если Prometheus вне Docker, таргет будет `localhost:8080` (или хост/порт соответствующего сервера).
+
+В Grafana добавьте Prometheus‑датасорс и постройте панели по счетчикам и задержкам.
 
 ## Структура репозитория
-
 ```
-├── .devcontainer - описание dev контейнера
-├── .vscode - конфигурация Visual Studio Code
-├── demoapp - демо-приложение, отдающее метрики
-│   ├── cmd
-│   │   ├── app - демо-приложение, отдающее метрики
-│   │   └── load - скрипт для генерации нагрузки на демо-приложение
-│   └── internal - внутренние библиотеки
-│       ├── helpers - вспомогательные методы (e.g. генерация случайных http кодов)
-│       ├── metrics - описание метрик
-│       └── middleware - middleware для сбора метрик
-├── .env - файл переменных окружения
-└── docs - документация
+demoapp/
+├─ cmd/
+│  ├─ app/   # сервер
+│  └─ load/  # генератор нагрузки
+└─ internal/
+   ├─ helpers/
+   ├─ metrics/
+   └─ middleware/
+docs/
+requirements.txt
+README.md
 ```
 
-## Как работать с репозиторием
+## Требования
+- Docker / Docker Desktop
+- (Опционально) docker-compose / Docker Compose v2
+- Для локального запуска без контейнеров: Python 3.10+ и `pip`
 
-1. Клонируем репозиторий и открываем его в Visual Studio Code
-2. Visual Studio Code предложит открыть репозиторий внутри docker контейнера, соглашаемся и ждем ![container.png](docs/container.png)
-3. После того как открылось новое окно Visual Studio Code, убеждаемся в доступности локального окружения
-   1. Запускаем демо-приложение, которое должно отдавать метрики - `Run and Debug` -> `App` -> `Start debugging` (F5) ![run.png](docs/run.png)
-   2. Аналогично запускаем скрипт для генераци нагрузки -  `Run and Debug` -> `Load` -> `Start debugging` (F5)
-   3. Убеждаемся, что запросы пошли
-   4. Убеждаемся что демо-приложение отдает метрики по адресу `localhost:8080/metrics` ![log.png](docs/log.png)
-
-### Переменные окружения
-
-Значение перменных окружения описаны в файле [.env](./.env). При измений значений в файле нужно перезапускать приложение (не контейнер!)
-
-| Переменная                   | Описание                                                                               | Значение по умолчанию |
-| -----------------------------| -------------------------------------------------------------------------------------- | --------------------- |
-| HTTP_REQUESTS_INFLIGHT_MAX   | Максимальное количество запросов, которое приложение может обрабатывать "одновременно" | 20 |
-| HTTP_REQUESTS_SUCCESSFUL_MAX | Максимальное количество запросов, которое может быть "одновременно" отправлено на эндпойнты, которые возвращают код 2xx | 15 |
-| HTTP_REQUESTS_ERROR_MAX      | Максимальное количество запросов, которое может быть "одновременно" отправлено на эндпойнты, которые возвращают код >= 400 | 5 |
-
-## Ссылки
-
-1. [Дефолтная конфигурация prometheus](https://prometheus.io/docs/prometheus/latest/getting_started/#configuring-prometheus-to-monitor-itself)
-2. [Prometheus на docker hub](https://hub.docker.com/layers/prom/prometheus/v2.43.0/images/sha256-df60172c8d9f08cadae1d79bf86525b6426c47873c712ddf0a04ed424a8c1ad4?context=explore)
-3. [Grafana на docker hub](https://hub.docker.com/layers/grafana/grafana/9.5.1/images/sha256-5056e8264a8420f23838fb23c77a7bce9370161d5d90adeff47dde03b80c2e14?context=explore)
-4. [Alertmanager на docker hub](https://hub.docker.com/layers/prom/alertmanager/v0.25.0/images/sha256-db8303fa05341f5dc6b19b36a97325cd1b8307254ed9042a2c554af71f3c0284?context=explore)
-5. [Alertmanager configuration example](https://prometheus.io/docs/alerting/latest/configuration/#example)
-6. [Receiver configuration](https://prometheus.io/docs/alerting/latest/configuration/#receiver)
-7. [Telegram configuration](https://prometheus.io/docs/alerting/latest/configuration/#telegram_config)
-8. [Promethues test example](https://prometheus.io/docs/prometheus/latest/configuration/unit_testing_rules/#example)
-9. Команда для установки promtool - `(cd /tmp/ && curl -L https://github.com/prometheus/prometheus/releases/download/v2.45.0-rc.0/prometheus-2.45.0-rc.0.linux-amd64.tar.gz | tar -xz && sudo mv /tmp/prometheus-2.45.0-rc.0.linux-amd64/promtool /usr/local/bin/ && rm -rf /tmp/prometheus-2.45.0-rc.0.linux-amd64)`
+Полезные ссылки:
+- Документация Prometheus: https://prometheus.io/docs/
+- Документация Grafana: https://grafana.com/docs/
